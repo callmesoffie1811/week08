@@ -14,6 +14,7 @@ jobs:
     name: Deploy to Production
     runs-on: ubuntu-latest
 
+    # Only deploy when the staging test completed successfully
     if: >
       ${{ github.event.workflow_run.conclusion == 'success' }}
 
@@ -21,11 +22,17 @@ jobs:
       name: production
 
     steps:
+      # ---------------------------------------------------------
+      # Checkout the same commit that passed staging validation
+      # ---------------------------------------------------------
       - name: Checkout tested commit
         uses: actions/checkout@v4
         with:
-           ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
 
+      # ---------------------------------------------------------
+      # Azure authentication
+      # ---------------------------------------------------------
       - name: Login to Azure
         uses: azure/login@v3
         with:
@@ -38,12 +45,18 @@ jobs:
             --name ${{ vars.AKS_CLUSTER_NAME }} \
             --overwrite-existing
 
+      # ---------------------------------------------------------
+      # Prepare production namespace
+      # ---------------------------------------------------------
       - name: Create production namespace
         run: |
           kubectl create namespace production \
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      # ---------------------------------------------------------
+      # Create production secrets
+      # ---------------------------------------------------------
       - name: Create PostgreSQL secret
         run: |
           kubectl create secret generic postgres-secret \
@@ -67,15 +80,21 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      # ---------------------------------------------------------
+      # Apply production Kubernetes manifests
+      # ---------------------------------------------------------
       - name: Apply Kubernetes manifests
         run: |
           kubectl apply \
             -f kubernetes/production/
 
+      # ---------------------------------------------------------
+      # Promote the exact image SHA that passed staging
+      # ---------------------------------------------------------
       - name: Update frontend image
         run: |
           kubectl set image deployment/frontend \
-            frontend=${{ vars.ACR_LOGIN_SERVER }}/koalatech-frontend:${{ github.event.workflow_run.head_sha }}
+            frontend=${{ vars.ACR_LOGIN_SERVER }}/koalatech-frontend:${{ github.event.workflow_run.head_sha }} \
             -n production
 
       - name: Update user-service image
@@ -108,6 +127,9 @@ jobs:
             enrollment-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-enrollment-service:${{ github.event.workflow_run.head_sha }} \
             -n production
 
+      # ---------------------------------------------------------
+      # Wait for all production deployments
+      # ---------------------------------------------------------
       - name: Wait for frontend rollout
         run: |
           kubectl rollout status deployment/frontend \
@@ -144,12 +166,26 @@ jobs:
             -n production \
             --timeout=300s
 
+      # ---------------------------------------------------------
+      # Display deployed production resources
+      # ---------------------------------------------------------
       - name: Show production resources
         run: |
+          echo "=== Production Pods ==="
           kubectl get pods -n production
+
+          echo ""
+          echo "=== Production Services ==="
           kubectl get services -n production
+
+          echo ""
+          echo "=== Production Persistent Volume Claims ==="
           kubectl get pvc -n production
-            - name: Wait for production frontend IP
+
+      # ---------------------------------------------------------
+      # Wait for frontend LoadBalancer IP
+      # ---------------------------------------------------------
+      - name: Wait for production frontend IP
         run: |
           for i in {1..30}; do
 
@@ -170,6 +206,9 @@ jobs:
           echo "Unable to find production frontend IP."
           exit 1
 
+      # ---------------------------------------------------------
+      # Verify that production is actually reachable
+      # ---------------------------------------------------------
       - name: Verify production frontend
         run: |
           curl \
@@ -178,6 +217,10 @@ jobs:
             --retry-delay 5 \
             http://${{ env.PROD_IP }}
 
+      # ---------------------------------------------------------
+      # Print final production URL
+      # ---------------------------------------------------------
       - name: Show production URL
         run: |
+          echo "Production deployment completed successfully."
           echo "Production URL: http://${{ env.PROD_IP }}"
