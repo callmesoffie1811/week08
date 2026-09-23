@@ -11,6 +11,40 @@ on:
 
 
 jobs:
+  # =========================================================
+  # Infrastructure Validation
+  # =========================================================
+  terraform:
+    name: Terraform Validate and Plan
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Format Check
+        run: terraform fmt -check
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -input=false -no-color
 
   # =========================================================
   # Backend Tests
@@ -112,6 +146,7 @@ jobs:
     # All backend tests must pass before this job starts
     needs:
       - backend-test
+      - terraform
 
     # Build and push when code is pushed to main or manually triggered
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -153,12 +188,33 @@ jobs:
         run: |
           az acr login --name ${{ vars.ACR_NAME }}
 
-      - name: Build Docker image
+            - name: Build Docker image
         run: |
           docker build \
             --platform linux/amd64 \
             -t ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }} \
             ./${{ matrix.service }}
+
+      # =========================================================
+      # Docker Scout Security Scan
+      # =========================================================
+      - name: Docker Scout vulnerability scan
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: local://${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USER }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          only-severities: critical,high
+          exit-code: false
+
+      - name: Docker Scout recommendations
+        uses: docker/scout-action@v1
+        with:
+          command: recommendations
+          image: local://${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USER }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Push Docker image with commit SHA
         run: |
